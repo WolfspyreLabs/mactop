@@ -294,9 +294,11 @@ func updateHelpText() {
 			"--interval, -i: Set the update interval in milliseconds. Default is 1000.\n"+
 			"--prometheus, -p: Set and enable a Prometheus metrics port. Default is none. (e.g. --prometheus=9090)\n"+
 			"--headless: Run in headless mode (no TUI, output to stdout)\n"+
-			"--format: Output format for headless mode (json, yaml, xml, csv, toon). Default is json.\n"+
+			"--format: Output format for headless mode (json, yaml, xml, csv, toon, snmp). Default is json.\n"+
 			"--pretty: Pretty print output in headless mode\n"+
 			"--count: Number of samples to collect in headless mode (0 = infinite)\n"+
+			"--output-file: Write headless output to file (default: stdout)\n"+
+			"--append: Append to output file instead of overwriting (default: false)\n"+
 			"--dump-ioreport, -d: Dump all available IOReport channels and exit\n"+
 			"--unit-network: Network unit: auto, byte, kb, mb, gb (default: auto)\n"+
 			"--unit-disk: Disk unit: auto, byte, kb, mb, gb (default: auto)\n"+
@@ -574,6 +576,8 @@ func Run() {
 	flag.BoolVar(&headlessPretty, "pretty", false, "Pretty print output in headless mode")
 	flag.IntVar(&headlessCount, "count", 0, "Number of samples to collect in headless mode (0 = infinite)")
 	flag.StringVar(&headlessFormat, "format", "json", "Output format for headless mode: json, yaml, xml, csv, toon")
+	flag.StringVar(&headlessOutputFile, "output-file", "", "Write headless output to file (default: stdout)")
+	flag.BoolVar(&headlessAppend, "append", false, "Append to output file instead of overwriting (default: false)")
 	flag.IntVar(&updateInterval, "interval", 1000, "Update interval in milliseconds")
 	flag.IntVar(&updateInterval, "i", 1000, "Update interval in milliseconds")
 	flag.Bool("d", false, "Dump all available IOReport channels and exit")

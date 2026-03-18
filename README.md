@@ -43,7 +43,7 @@
 - **Navigation**: Enhanced Vim-like navigation (`g` top, `G` bottom, `j`/`k` scroll)
 - **Headless Mode**: Output JSON metrics to stdout for scripting/logging (`--headless`)
 - **JSON Formatting**: Pretty print JSON output (`--pretty`) or set collection count (`--count <n>`)
-- **Output Formats**: JSON (default), YAML, XML, CSV, and [TOON](https://github.com/toon-format/toon) (`--format <format>`)
+- **Output Formats**: JSON (default), YAML, XML, CSV, TOON, and SNMP key=value (`--format <format>`)
 - **Freeze**: Pause/Resume process list updates (`f`)
 - Party Mode (Randomly cycles through colors) (`p` to toggle)
 - Optional Prometheus Metrics server (default is disabled) (`-p <port>` or `--prometheus <port>`)
@@ -130,14 +130,96 @@ mactop --headless --pretty
 
 # Run with different output formats (json, yaml, xml, toon)
 mactop --headless --format toon
+
+# Run with SNMP format for snmpd consumption
+mactop --headless --format snmp --output-file /tmp/mactop_metrics.txt
+
+# Run with Prometheus endpoint AND SNMP file output
+mactop --headless \
+  --prometheus :9091 \
+  --format snmp \
+  --output-file /tmp/mactop_metrics.txt \
+  --interval 1000
+
+# Append mode for accumulating samples
+mactop --headless \
+  --format snmp \
+  --output-file /tmp/mactop_history.txt \
+  --append \
+  --count 0
+```
+
+### Headless Output Formats
+
+mactop supports multiple output formats for headless mode:
+
+#### JSON (default)
+Structured data format, great for scripting and APIs:
+```bash
+mactop --headless --count 1
+```
+
+#### YAML
+Human-readable structured format:
+```bash
+mactop --headless --count 1 --format yaml
+```
+
+#### XML
+Structured format compatible with XML parsers:
+```bash
+mactop --headless --count 1 --format xml
+```
+
+#### CSV
+Tabular format for spreadsheets and data analysis:
+```bash
+mactop --headless --count 1 --format csv
+```
+
+#### TOON
+Specialized format from the toon-go library:
+```bash
+mactop --headless --count 1 --format toon
+```
+
+#### SNMP (key=value)
+Simple key=value format for snmpd consumption:
+
+**Output format:**
+```
+mactop.cpu.usage=12.5
+mactop.gpu.usage=18.2
+mactop.memory.used_gb=27.1
+mactop.network.in_bytes_per_sec=1234567
+mactop.timestamp=2026-03-18T18:00:00-05:00
+```
+
+**Example snmpd configuration:**
+```
+extend mactop /usr/local/bin/mactop-snmp-wrapper.sh
+```
+
+**Example wrapper script (`/usr/local/bin/mactop-snmp-wrapper.sh`):**
+```bash
+#!/bin/bash
+# Read the latest metrics file and output in SNMP format
+cat /tmp/mactop_metrics.txt
+```
+
+**Run with SNMP format:**
+```bash
+mactop --headless --format snmp --output-file /tmp/mactop_metrics.txt
 ```
 
 ## mactop Flags
 
 - `--headless`: Run in headless mode (no TUI, output to stdout).
-- `--format`: Output format for headless mode (json, yaml, xml, toon). Default is json.
+- `--format`: Output format for headless mode (json, yaml, xml, toon, snmp). Default is json.
 - `--count`: Number of samples to collect in headless mode (0 = infinite).
 - `--pretty`: Pretty print JSON output in headless mode.
+- `--output-file`: Write headless output to file instead of stdout (e.g., `/tmp/mactop_metrics.txt`).
+- `--append`: Append to output file instead of overwriting (useful for accumulating samples).
 - `--interval` or `-i`: Set the update interval in milliseconds. Default is 1000.
 - `--foreground`: Set the UI foreground color. Accepts named colors (green, red, blue, etc.) or hex colors (#9580FF).
 - `--bg` or `--background`: Set the UI background color. Accepts named colors (mocha-base, etc.) or hex colors (#22212C).

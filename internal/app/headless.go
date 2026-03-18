@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -110,15 +111,13 @@ func runHeadless(count int) {
 	// Validate format
 	format := strings.ToLower(headlessFormat)
 	switch format {
-	case "json", "yaml", "xml", "toon", "csv":
+	case "json", "yaml", "xml", "toon", "csv", "snmp":
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown format: %s. Defaulting to json.\n", format)
 		format = "json"
 	}
 
 	tbInfo := performHeadlessWarmup()
-
-	printHeadlessStart(format, count)
 
 	// Setup signal handling for graceful shutdown (to close XML tags)
 	sigChan := make(chan os.Signal, 1)
@@ -129,14 +128,37 @@ func runHeadless(count int) {
 	// Cache SystemInfo since it doesn't change
 	cachedHeadlessSysInfo := getSOCInfo()
 
+	// For infinite mode with overwrite, open/close file for each sample to ensure overwrite
+	// For count mode or append mode, keep file open
+	var outputFile *os.File
+	var err error
+	keepFileOpen := headlessAppend || count > 0
+
+	if headlessOutputFile != "" && keepFileOpen {
+		flags := os.O_CREATE | os.O_WRONLY
+		if headlessAppend {
+			flags |= os.O_APPEND
+		} else {
+			flags |= os.O_TRUNC
+		}
+		outputFile, err = os.OpenFile(headlessOutputFile, flags, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open output file: %v\n", err)
+			os.Exit(1)
+		}
+		defer outputFile.Close()
+	}
+
+	printHeadlessStart(format, count, outputFile)
+
 	// First manual collection
-	if err := processHeadlessSample(format, tbInfo, cachedHeadlessSysInfo); err != nil {
+	if err := processHeadlessSample(format, tbInfo, cachedHeadlessSysInfo, outputFile, keepFileOpen); err != nil {
 		fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
 	}
 	samplesCollected++
 
 	if count > 0 && samplesCollected >= count {
-		printHeadlessEnd(format, count)
+		printHeadlessEnd(format, count, outputFile, samplesCollected)
 		return
 	}
 
@@ -146,46 +168,64 @@ func runHeadless(count int) {
 	for {
 		select {
 		case <-sigChan:
-			printHeadlessEnd(format, count)
+			printHeadlessEnd(format, count, outputFile, samplesCollected)
 			return
 		case <-ticker.C:
-			printHeadlessSeparator(format, count, samplesCollected)
+			printHeadlessSeparator(format, count, samplesCollected, outputFile)
 
-			if err := processHeadlessSample(format, tbInfo, cachedHeadlessSysInfo); err != nil {
+			if err := processHeadlessSample(format, tbInfo, cachedHeadlessSysInfo, outputFile, keepFileOpen); err != nil {
 				fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
 			}
 
 			samplesCollected++
 			if count > 0 && samplesCollected >= count {
-				printHeadlessEnd(format, count)
+				printHeadlessEnd(format, count, outputFile, samplesCollected)
 				return
 			}
 		}
 	}
 }
 
-func printHeadlessStart(format string, count int) {
+func printHeadlessStart(format string, count int, outputFile *os.File) {
+	writer := getHeadlessWriter(outputFile)
 	if count > 0 {
 		switch format {
 		case "json":
-			fmt.Print("[")
+			// Check if file exists and has content when appending
+			if headlessAppend && outputFile != nil {
+				// Seek to end to check current position
+				pos, _ := outputFile.Seek(0, io.SeekEnd)
+				if pos > 0 {
+					// File has content, need to write comma before next object
+					fmt.Fprint(writer, ",")
+					return
+				}
+			}
+			fmt.Fprint(writer, "[")
 		case "xml":
-			fmt.Print("<MactopOutputList>")
+			fmt.Fprint(writer, "<MactopOutputList>")
 		case "csv":
-			printCSVHeader()
+			printCSVHeader(writer)
 		}
 	} else {
 		switch format {
 		case "xml":
 			// XML always needs a root element, even in infinite mode
-			fmt.Print("<MactopOutputList>")
+			fmt.Fprint(writer, "<MactopOutputList>")
 		case "csv":
-			printCSVHeader()
+			printCSVHeader(writer)
 		}
 	}
 }
 
-func printCSVHeader() {
+func getHeadlessWriter(outputFile *os.File) io.Writer {
+	if outputFile != nil {
+		return outputFile
+	}
+	return os.Stdout
+}
+
+func printCSVHeader(writer io.Writer) {
 	headers := []string{
 		"Timestamp",
 		"System_Name", "Core_Count", "E_Core_Count", "P_Core_Count", "GPU_Core_Count",
@@ -210,33 +250,38 @@ func printCSVHeader() {
 	headers = append(headers, "Thunderbolt_Info_JSON", "Processes_JSON", "Network_Links_JSON", "Volumes_JSON")
 
 	// Print CSV header line
-	fmt.Println(strings.Join(headers, ","))
+	fmt.Fprintln(writer, strings.Join(headers, ","))
 }
 
-func printHeadlessEnd(format string, count int) {
+func printHeadlessEnd(format string, count int, outputFile *os.File, samplesCollected int) {
+	writer := getHeadlessWriter(outputFile)
 	if count > 0 {
 		switch format {
 		case "json":
-			fmt.Println("]")
+			// Only close the array if we're not in append mode or this is the final sample
+			if !headlessAppend || samplesCollected >= count {
+				fmt.Fprintln(writer, "]")
+			}
 		case "xml":
-			fmt.Println("</MactopOutputList>")
+			fmt.Fprintln(writer, "</MactopOutputList>")
 		}
 	} else if format == "xml" {
-		fmt.Println("</MactopOutputList>")
+		fmt.Fprintln(writer, "</MactopOutputList>")
 	}
 }
 
-func printHeadlessSeparator(format string, count int, samplesCollected int) {
+func printHeadlessSeparator(format string, count int, samplesCollected int, outputFile *os.File) {
+	writer := getHeadlessWriter(outputFile)
 	if samplesCollected > 0 && count > 0 {
 		switch format {
 		case "json":
-			fmt.Print(",")
+			fmt.Fprint(writer, ",")
 		case "yaml":
-			fmt.Println("---")
+			fmt.Fprintln(writer, "---")
 		}
 	} else if format == "yaml" {
 		// Even for infinite stream, YAML docs are best separated by ---
-		fmt.Println("---")
+		fmt.Fprintln(writer, "---")
 	}
 }
 
@@ -267,10 +312,29 @@ func performHeadlessWarmup() *ThunderboltOutput {
 	return tbInfo
 }
 
-func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo SystemInfo) error {
+func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo SystemInfo, outputFile *os.File, keepFileOpen bool) error {
 	output := collectHeadlessData(tbInfo, sysInfo)
 	var data []byte
 	var err error
+
+	// For infinite mode with overwrite, open file for each sample
+	var tempFile *os.File
+	writer := getHeadlessWriter(outputFile)
+	if !keepFileOpen && headlessOutputFile != "" {
+		// Open file for this sample only (overwrite mode, infinite)
+		flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+		tempFile, err = os.OpenFile(headlessOutputFile, flags, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open output file: %v", err)
+		}
+		defer tempFile.Close()
+		writer = tempFile
+
+		// For CSV format, we need to write the header each time in overwrite mode
+		if format == "csv" {
+			printCSVHeader(writer)
+		}
+	}
 
 	switch format {
 	case "json":
@@ -291,7 +355,7 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		data, err = toon.Marshal(output)
 	case "csv":
 		// Use encoding/csv for correct escaping
-		writer := csv.NewWriter(os.Stdout)
+		csvWriter := csv.NewWriter(writer)
 
 		var record []string
 
@@ -344,8 +408,36 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		volsJSON, _ := json.Marshal(output.Volumes)
 		record = append(record, string(tbJSON), string(procsJSON), string(linksJSON), string(volsJSON))
 
-		writer.Write(record)
-		writer.Flush()
+		csvWriter.Write(record)
+		csvWriter.Flush()
+		return nil
+	case "snmp":
+		// SNMP-compatible format: key=value pairs for snmpd consumption
+		// This format is easily parsable by snmpd extend/pass scripts
+		lines := []string{
+			fmt.Sprintf("mactop.cpu.usage=%.2f", output.CPUUsage),
+			fmt.Sprintf("mactop.cpu.ecpu_freq_mhz=%.0f", safeFloat64At(output.ECPUUsage, 0)),
+			fmt.Sprintf("mactop.cpu.pcpu_freq_mhz=%.0f", safeFloat64At(output.PCPUUsage, 0)),
+			fmt.Sprintf("mactop.gpu.usage=%.2f", output.GPUUsage),
+			fmt.Sprintf("mactop.gpu.freq_mhz=%d", output.GPUMetrics.FreqMHz),
+			fmt.Sprintf("mactop.memory.used_gb=%.2f", float64(output.Memory.Used)/1024/1024/1024),
+			fmt.Sprintf("mactop.memory.total_gb=%.2f", float64(output.Memory.Total)/1024/1024/1024),
+			fmt.Sprintf("mactop.memory.swap_used_gb=%.2f", float64(output.Memory.SwapUsed)/1024/1024/1024),
+			fmt.Sprintf("mactop.network.in_bytes_per_sec=%.2f", output.NetDisk.InBytesPerSec),
+			fmt.Sprintf("mactop.network.out_bytes_per_sec=%.2f", output.NetDisk.OutBytesPerSec),
+			fmt.Sprintf("mactop.disk.read_kbytes_per_sec=%.2f", output.NetDisk.ReadKBytesPerSec),
+			fmt.Sprintf("mactop.disk.write_kbytes_per_sec=%.2f", output.NetDisk.WriteKBytesPerSec),
+			fmt.Sprintf("mactop.power.total_watts=%.2f", output.SocMetrics.TotalPower),
+			fmt.Sprintf("mactop.power.system_watts=%.2f", output.SocMetrics.SystemPower),
+			fmt.Sprintf("mactop.temp.cpu_celsius=%.2f", output.SocMetrics.CPUTemp),
+			fmt.Sprintf("mactop.temp.gpu_celsius=%.2f", output.SocMetrics.GPUTemp),
+			fmt.Sprintf("mactop.thermal.state=%s", output.ThermalState),
+			fmt.Sprintf("mactop.rdma.available=%t", output.RDMAStatus.Available),
+			fmt.Sprintf("mactop.timestamp=%s", output.Timestamp),
+		}
+		for _, line := range lines {
+			fmt.Fprintln(writer, line)
+		}
 		return nil
 	}
 
@@ -353,7 +445,7 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		return err
 	}
 
-	fmt.Println(string(data))
+	fmt.Fprintln(writer, string(data))
 	return nil
 }
 

@@ -60,14 +60,16 @@ var (
 	maxPowerSeen                  = 0.1
 	gpuValues                     = make([]float64, 100)
 
-	prometheusPort string
-	headless       bool
-	headlessPretty bool
-	headlessCount  int
-	headlessFormat string
-	menubar        bool   // Run as menu bar status item
-	cliBgColor     string // Background color from --bg flag
-	interruptChan  = make(chan struct{}, 10)
+	prometheusPort     string
+	headless           bool
+	headlessPretty     bool
+	headlessCount      int
+	headlessFormat     string
+	headlessOutputFile string // Path to file for headless output (default: stdout)
+	headlessAppend     bool   // Append to file instead of overwriting (default: false)
+	menubar            bool   // Run as menu bar status item
+	cliBgColor         string // Background color from --bg flag
+	interruptChan      = make(chan struct{}, 10)
 
 	cachedTermWidth    int
 	cachedTermHeight   int

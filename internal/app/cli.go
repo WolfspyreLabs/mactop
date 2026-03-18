@@ -73,9 +73,11 @@ Options:
   --bg <color>            Set the UI background color (named or hex, e.g., mocha-base, #22212C)
   -p, --prometheus <port> Run Prometheus metrics server on specified port (e.g. :9090)
       --headless          Run in headless mode (no TUI, output JSON to stdout)
-      --format <format>   Set the output format (json, toon, etc.)
+      --format <format>   Set the output format (json, yaml, xml, csv, toon, snmp)
       --pretty            Pretty print JSON output in headless mode
       --count <n>         Number of samples to collect in headless mode (0 = infinite)
+      --output-file <path> Write headless output to file (default: stdout)
+      --append            Append to output file instead of overwriting (default: false)
       --dump-ioreport, -d Dump all available IOReport channels and exit
       --unit-network <unit> Network unit: auto, byte, kb, mb, gb (default: auto)
       --unit-disk <unit>    Disk unit: auto, byte, kb, mb, gb (default: auto)
