@@ -286,7 +286,7 @@ func formatConnectedDevices(devices []ThunderboltDevice) []ThunderboltDeviceOutp
 
 		devInfo := ""
 		if dev.Vendor != "" {
-			devInfo = fmt.Sprintf("%s", dev.Vendor)
+			devInfo = dev.Vendor
 		}
 		modePretty := getFormattedMode(dev.Mode)
 

@@ -302,11 +302,5 @@ func getMemoryMetrics() MemoryMetrics {
 		stderrLogger.Printf("Error getting native memory metrics: %v\n", err)
 		return MemoryMetrics{}
 	}
-	return MemoryMetrics{
-		Total:     native.Total,
-		Used:      native.Used,
-		Available: native.Available,
-		SwapTotal: native.SwapTotal,
-		SwapUsed:  native.SwapUsed,
-	}
+	return MemoryMetrics(native)
 }

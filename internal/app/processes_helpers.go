@@ -74,7 +74,7 @@ func resolveSelectedHeaderFg(themeColorStr string) string {
 
 func getProcessListTitle() (string, ui.Style) {
 	// Resolve title color (use process list color if set)
-	var titleColor ui.Color = ui.ColorClear
+	var titleColor = ui.ColorClear
 	if currentConfig.CustomTheme != nil && currentConfig.CustomTheme.ProcessList != "" {
 		if color, err := ParseHexColor(currentConfig.CustomTheme.ProcessList); err == nil {
 			titleColor = color
