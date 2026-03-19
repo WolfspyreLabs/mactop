@@ -26,7 +26,11 @@ func TestHeadlessIntegration(t *testing.T) {
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build binary: %v\nOutput: %s", err, out)
 	}
-	defer os.Remove(filepath.Join(projectRoot, "mactop_test_binary"))
+	defer func() {
+		if err := os.Remove(filepath.Join(projectRoot, "mactop_test_binary")); err != nil {
+			t.Logf("Warning: could not remove test binary: %v", err)
+		}
+	}()
 
 	cmd := exec.CommandContext(ctx, "./mactop_test_binary", "--headless", "--count", "1")
 	cmd.Dir = projectRoot

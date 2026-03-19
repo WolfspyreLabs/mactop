@@ -99,6 +99,8 @@ type HeadlessOutput struct {
 	RDMAStatus            RDMAStatus           `json:"rdma_status" yaml:"rdma_status" xml:"RDMAStatus" toon:"rdma_status"`
 }
 
+// runHeadless executes headless mode, collecting metrics and outputting them
+// in the specified format to stdout or a file.
 func runHeadless(count int) {
 	if err := initSocMetrics(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize metrics: %v\n", err)
@@ -146,7 +148,11 @@ func runHeadless(count int) {
 			fmt.Fprintf(os.Stderr, "Failed to open output file: %v\n", err)
 			os.Exit(1)
 		}
-		defer outputFile.Close()
+		defer func() {
+			if closeErr := outputFile.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Error closing output file: %v\n", closeErr)
+			}
+		}()
 	}
 
 	printHeadlessStart(format, count, outputFile)
@@ -186,6 +192,9 @@ func runHeadless(count int) {
 	}
 }
 
+// printHeadlessStart writes the opening format for headless output.
+// For JSON with count > 0, writes opening bracket. For XML, writes root element.
+// For CSV, writes the header row.
 func printHeadlessStart(format string, count int, outputFile *os.File) {
 	writer := getHeadlessWriter(outputFile)
 	if count > 0 {
@@ -194,16 +203,25 @@ func printHeadlessStart(format string, count int, outputFile *os.File) {
 			// Check if file exists and has content when appending
 			if headlessAppend && outputFile != nil {
 				// Seek to end to check current position
-				pos, _ := outputFile.Seek(0, io.SeekEnd)
+				pos, err := outputFile.Seek(0, io.SeekEnd)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error seeking output file: %v\n", err)
+				}
 				if pos > 0 {
 					// File has content, need to write comma before next object
-					fmt.Fprint(writer, ",")
+					if _, err := fmt.Fprint(writer, ","); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+					}
 					return
 				}
 			}
-			fmt.Fprint(writer, "[")
+			if _, err := fmt.Fprint(writer, "["); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+			}
 		case "xml":
-			fmt.Fprint(writer, "<MactopOutputList>")
+			if _, err := fmt.Fprint(writer, "<MactopOutputList>"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+			}
 		case "csv":
 			printCSVHeader(writer)
 		}
@@ -211,13 +229,17 @@ func printHeadlessStart(format string, count int, outputFile *os.File) {
 		switch format {
 		case "xml":
 			// XML always needs a root element, even in infinite mode
-			fmt.Fprint(writer, "<MactopOutputList>")
+			if _, err := fmt.Fprint(writer, "<MactopOutputList>"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+			}
 		case "csv":
 			printCSVHeader(writer)
 		}
 	}
 }
 
+// getHeadlessWriter returns the appropriate writer for headless output.
+// If outputFile is provided, it returns the file; otherwise returns stdout.
 func getHeadlessWriter(outputFile *os.File) io.Writer {
 	if outputFile != nil {
 		return outputFile
@@ -225,6 +247,7 @@ func getHeadlessWriter(outputFile *os.File) io.Writer {
 	return os.Stdout
 }
 
+// printCSVHeader writes the CSV header line to the provided writer.
 func printCSVHeader(writer io.Writer) {
 	headers := []string{
 		"Timestamp",
@@ -250,9 +273,13 @@ func printCSVHeader(writer io.Writer) {
 	headers = append(headers, "Thunderbolt_Info_JSON", "Processes_JSON", "Network_Links_JSON", "Volumes_JSON")
 
 	// Print CSV header line
-	fmt.Fprintln(writer, strings.Join(headers, ","))
+	if _, err := fmt.Fprintln(writer, strings.Join(headers, ",")); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing CSV header: %v\n", err)
+	}
 }
 
+// printHeadlessEnd writes the closing format for headless output.
+// For JSON with count > 0, writes closing bracket. For XML, writes closing root element.
 func printHeadlessEnd(format string, count int, outputFile *os.File, samplesCollected int) {
 	writer := getHeadlessWriter(outputFile)
 	if count > 0 {
@@ -260,28 +287,42 @@ func printHeadlessEnd(format string, count int, outputFile *os.File, samplesColl
 		case "json":
 			// Only close the array if we're not in append mode or this is the final sample
 			if !headlessAppend || samplesCollected >= count {
-				fmt.Fprintln(writer, "]")
+				if _, err := fmt.Fprintln(writer, "]"); err != nil {
+					fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+				}
 			}
 		case "xml":
-			fmt.Fprintln(writer, "</MactopOutputList>")
+			if _, err := fmt.Fprintln(writer, "</MactopOutputList>"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+			}
 		}
 	} else if format == "xml" {
-		fmt.Fprintln(writer, "</MactopOutputList>")
+		if _, err := fmt.Fprintln(writer, "</MactopOutputList>"); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing to output file: %v\n", err)
+		}
 	}
 }
 
+// printHeadlessSeparator writes separators between samples in headless output.
+// For JSON, writes comma. For YAML, writes document separator (---).
 func printHeadlessSeparator(format string, count int, samplesCollected int, outputFile *os.File) {
 	writer := getHeadlessWriter(outputFile)
 	if samplesCollected > 0 && count > 0 {
 		switch format {
 		case "json":
-			fmt.Fprint(writer, ",")
+			if _, err := fmt.Fprint(writer, ","); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing separator: %v\n", err)
+			}
 		case "yaml":
-			fmt.Fprintln(writer, "---")
+			if _, err := fmt.Fprintln(writer, "---"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing separator: %v\n", err)
+			}
 		}
 	} else if format == "yaml" {
 		// Even for infinite stream, YAML docs are best separated by ---
-		fmt.Fprintln(writer, "---")
+		if _, err := fmt.Fprintln(writer, "---"); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing separator: %v\n", err)
+		}
 	}
 }
 
@@ -297,7 +338,9 @@ func startHeadlessPrometheus() {
 }
 
 func performHeadlessWarmup() *ThunderboltOutput {
-	GetCPUPercentages()
+	if _, err := GetCPUPercentages(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting CPU percentages: %v\n", err)
+	}
 	getNetDiskMetrics()
 	GetThunderboltNetStats()
 
@@ -312,6 +355,8 @@ func performHeadlessWarmup() *ThunderboltOutput {
 	return tbInfo
 }
 
+// processHeadlessSample collects a single sample of metrics and outputs it
+// in the specified format. If outputFile is provided, writes to file; otherwise stdout.
 func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo SystemInfo, outputFile *os.File, keepFileOpen bool) error {
 	output := collectHeadlessData(tbInfo, sysInfo)
 	var data []byte
@@ -327,7 +372,11 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		if err != nil {
 			return fmt.Errorf("failed to open output file: %v", err)
 		}
-		defer tempFile.Close()
+		defer func() {
+			if closeErr := tempFile.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Error closing temp file: %v\n", closeErr)
+			}
+		}()
 		writer = tempFile
 
 		// For CSV format, we need to write the header each time in overwrite mode
@@ -408,7 +457,9 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		volsJSON, _ := json.Marshal(output.Volumes)
 		record = append(record, string(tbJSON), string(procsJSON), string(linksJSON), string(volsJSON))
 
-		csvWriter.Write(record)
+		if err := csvWriter.Write(record); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing CSV record: %v\n", err)
+		}
 		csvWriter.Flush()
 		return nil
 	case "snmp":
@@ -436,7 +487,9 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 			fmt.Sprintf("mactop.timestamp=%s", output.Timestamp),
 		}
 		for _, line := range lines {
-			fmt.Fprintln(writer, line)
+			if _, err := fmt.Fprintln(writer, line); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing SNMP line: %v\n", err)
+			}
 		}
 		return nil
 	}
@@ -445,7 +498,9 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		return err
 	}
 
-	fmt.Fprintln(writer, string(data))
+	if _, err := fmt.Fprintln(writer, string(data)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
+	}
 	return nil
 }
 

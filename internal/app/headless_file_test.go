@@ -28,7 +28,11 @@ func TestHeadlessSNMPFormat(t *testing.T) {
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build binary: %v\nOutput: %s", err, out)
 	}
-	defer os.Remove(filepath.Join(projectRoot, "mactop_test_binary"))
+	defer func() {
+		if err := os.Remove(filepath.Join(projectRoot, "mactop_test_binary")); err != nil {
+			t.Logf("Warning: could not remove test binary: %v", err)
+		}
+	}()
 
 	cmd := exec.CommandContext(ctx, "./mactop_test_binary", "--headless", "--count", "1", "--format", "snmp")
 	cmd.Dir = projectRoot
@@ -90,8 +94,14 @@ func TestHeadlessFileOutput(t *testing.T) {
 	tmpFile := filepath.Join(os.TempDir(), "mactop_test_file.json")
 
 	// Clean up any existing file
-	os.Remove(tmpFile)
-	defer os.Remove(tmpFile)
+	if err := os.Remove(tmpFile); err != nil && !os.IsNotExist(err) {
+		t.Logf("Warning: could not remove temp file: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(tmpFile); err != nil {
+			t.Logf("Warning: could not remove temp file: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -101,7 +111,11 @@ func TestHeadlessFileOutput(t *testing.T) {
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build binary: %v\nOutput: %s", err, out)
 	}
-	defer os.Remove(filepath.Join(projectRoot, "mactop_test_binary"))
+	defer func() {
+		if err := os.Remove(filepath.Join(projectRoot, "mactop_test_binary")); err != nil {
+			t.Logf("Warning: could not remove test binary: %v", err)
+		}
+	}()
 
 	// Test file output
 	cmd := exec.CommandContext(ctx, "./mactop_test_binary", "--headless", "--count", "1", "--output-file", tmpFile)
@@ -151,8 +165,14 @@ func TestHeadlessAppendMode(t *testing.T) {
 	tmpFile := filepath.Join(os.TempDir(), "mactop_test_append_snmp.txt")
 
 	// Clean up any existing file
-	os.Remove(tmpFile)
-	defer os.Remove(tmpFile)
+	if err := os.Remove(tmpFile); err != nil && !os.IsNotExist(err) {
+		t.Logf("Warning: could not remove temp file: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(tmpFile); err != nil {
+			t.Logf("Warning: could not remove temp file: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -162,7 +182,11 @@ func TestHeadlessAppendMode(t *testing.T) {
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build binary: %v\nOutput: %s", err, out)
 	}
-	defer os.Remove(filepath.Join(projectRoot, "mactop_test_binary"))
+	defer func() {
+		if err := os.Remove(filepath.Join(projectRoot, "mactop_test_binary")); err != nil {
+			t.Logf("Warning: could not remove test binary: %v", err)
+		}
+	}()
 
 	// First write without append (SNMP format)
 	cmd1 := exec.CommandContext(ctx, "./mactop_test_binary", "--headless", "--count", "1", "--format", "snmp", "--output-file", tmpFile)
@@ -207,8 +231,14 @@ func TestHeadlessSNMPFileOutput(t *testing.T) {
 	tmpFile := filepath.Join(os.TempDir(), "mactop_test_snmp.txt")
 
 	// Clean up any existing file
-	os.Remove(tmpFile)
-	defer os.Remove(tmpFile)
+	if err := os.Remove(tmpFile); err != nil && !os.IsNotExist(err) {
+		t.Logf("Warning: could not remove temp file: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(tmpFile); err != nil {
+			t.Logf("Warning: could not remove temp file: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -218,7 +248,11 @@ func TestHeadlessSNMPFileOutput(t *testing.T) {
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build binary: %v\nOutput: %s", err, out)
 	}
-	defer os.Remove(filepath.Join(projectRoot, "mactop_test_binary"))
+	defer func() {
+		if err := os.Remove(filepath.Join(projectRoot, "mactop_test_binary")); err != nil {
+			t.Logf("Warning: could not remove test binary: %v", err)
+		}
+	}()
 
 	// Test SNMP format with file output
 	cmd := exec.CommandContext(ctx, "./mactop_test_binary", "--headless", "--count", "1", "--format", "snmp", "--output-file", tmpFile)
