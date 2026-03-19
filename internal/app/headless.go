@@ -110,44 +110,11 @@ func runHeadless(count int) {
 
 	startHeadlessPrometheus()
 
-	// Validate format
-	format := strings.ToLower(headlessFormat)
-	switch format {
-	case "json", "yaml", "xml", "toon", "csv", "snmp":
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown format: %s. Defaulting to json.\n", format)
-		format = "json"
-	}
-
+	format := validateFormat(strings.ToLower(headlessFormat))
 	tbInfo := performHeadlessWarmup()
-
-	// Setup signal handling for graceful shutdown (to close XML tags)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	samplesCollected := 0
-
-	// Cache SystemInfo since it doesn't change
 	cachedHeadlessSysInfo := getSOCInfo()
-
-	// For infinite mode with overwrite, open/close file for each sample to ensure overwrite
-	// For count mode or append mode, keep file open
-	var outputFile *os.File
-	var err error
-	keepFileOpen := headlessAppend || count > 0
-
-	if headlessOutputFile != "" && keepFileOpen {
-		flags := os.O_CREATE | os.O_WRONLY
-		if headlessAppend {
-			flags |= os.O_APPEND
-		} else {
-			flags |= os.O_TRUNC
-		}
-		outputFile, err = os.OpenFile(headlessOutputFile, flags, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to open output file: %v\n", err)
-			os.Exit(1)
-		}
+	outputFile, keepFileOpen := openHeadlessOutputFile(count)
+	if outputFile != nil {
 		defer func() {
 			if closeErr := outputFile.Close(); closeErr != nil {
 				fmt.Fprintf(os.Stderr, "Error closing output file: %v\n", closeErr)
@@ -157,7 +124,7 @@ func runHeadless(count int) {
 
 	printHeadlessStart(format, count, outputFile)
 
-	// First manual collection
+	samplesCollected := 0
 	if err := processHeadlessSample(format, tbInfo, cachedHeadlessSysInfo, outputFile, keepFileOpen); err != nil {
 		fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
 	}
@@ -168,24 +135,66 @@ func runHeadless(count int) {
 		return
 	}
 
+	runHeadlessLoop(format, count, tbInfo, cachedHeadlessSysInfo, outputFile, keepFileOpen, &samplesCollected)
+}
+
+// validateFormat ensures the format is valid, defaulting to json if unknown.
+func validateFormat(format string) string {
+	switch format {
+	case "json", "yaml", "xml", "toon", "csv", "snmp":
+		return format
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown format: %s. Defaulting to json.\n", format)
+		return "json"
+	}
+}
+
+// openHeadlessOutputFile opens the output file if specified and needed.
+func openHeadlessOutputFile(count int) (*os.File, bool) {
+	keepFileOpen := headlessAppend || count > 0
+	if headlessOutputFile == "" || !keepFileOpen {
+		return nil, keepFileOpen
+	}
+
+	flags := os.O_CREATE | os.O_WRONLY
+	if headlessAppend {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+
+	outputFile, err := os.OpenFile(headlessOutputFile, flags, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open output file: %v\n", err)
+		os.Exit(1)
+	}
+
+	return outputFile, keepFileOpen
+}
+
+// runHeadlessLoop runs the main collection loop for headless mode.
+func runHeadlessLoop(format string, count int, tbInfo *ThunderboltOutput, sysInfo SystemInfo, outputFile *os.File, keepFileOpen bool, samplesCollected *int) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
 	ticker := time.NewTicker(time.Duration(updateInterval) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-sigChan:
-			printHeadlessEnd(format, count, outputFile, samplesCollected)
+			printHeadlessEnd(format, count, outputFile, *samplesCollected)
 			return
 		case <-ticker.C:
-			printHeadlessSeparator(format, count, samplesCollected, outputFile)
+			printHeadlessSeparator(format, count, *samplesCollected, outputFile)
 
-			if err := processHeadlessSample(format, tbInfo, cachedHeadlessSysInfo, outputFile, keepFileOpen); err != nil {
+			if err := processHeadlessSample(format, tbInfo, sysInfo, outputFile, keepFileOpen); err != nil {
 				fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
 			}
 
-			samplesCollected++
-			if count > 0 && samplesCollected >= count {
-				printHeadlessEnd(format, count, outputFile, samplesCollected)
+			(*samplesCollected)++
+			if count > 0 && *samplesCollected >= count {
+				printHeadlessEnd(format, count, outputFile, *samplesCollected)
 				return
 			}
 		}
@@ -359,31 +368,141 @@ func performHeadlessWarmup() *ThunderboltOutput {
 // in the specified format. If outputFile is provided, writes to file; otherwise stdout.
 func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo SystemInfo, outputFile *os.File, keepFileOpen bool) error {
 	output := collectHeadlessData(tbInfo, sysInfo)
-	var data []byte
-	var err error
+	writer, closeWriter := getHeadlessWriterWithClose(outputFile, keepFileOpen, format)
+	defer closeWriter()
 
-	// For infinite mode with overwrite, open file for each sample
-	var tempFile *os.File
-	writer := getHeadlessWriter(outputFile)
+	switch format {
+	case "csv":
+		return writeCSVOutput(writer, output)
+	case "snmp":
+		return writeSNMPOutput(writer, output)
+	case "json", "yaml", "xml", "toon":
+		return writeStructuredOutput(writer, format, output)
+	default:
+		return fmt.Errorf("unsupported format: %s", format)
+	}
+}
+
+// getHeadlessWriterWithClose returns a writer and a close function for headless output.
+func getHeadlessWriterWithClose(outputFile *os.File, keepFileOpen bool, format string) (io.Writer, func()) {
 	if !keepFileOpen && headlessOutputFile != "" {
 		// Open file for this sample only (overwrite mode, infinite)
-		flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-		tempFile, err = os.OpenFile(headlessOutputFile, flags, 0644)
+		tempFile, err := os.OpenFile(headlessOutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
-			return fmt.Errorf("failed to open output file: %v", err)
+			fmt.Fprintf(os.Stderr, "Failed to open output file: %v\n", err)
+			return os.Stdout, func() {}
 		}
-		defer func() {
+
+		// For CSV format, write the header each time in overwrite mode
+		if format == "csv" {
+			printCSVHeader(tempFile)
+		}
+
+		return tempFile, func() {
 			if closeErr := tempFile.Close(); closeErr != nil {
 				fmt.Fprintf(os.Stderr, "Error closing temp file: %v\n", closeErr)
 			}
-		}()
-		writer = tempFile
-
-		// For CSV format, we need to write the header each time in overwrite mode
-		if format == "csv" {
-			printCSVHeader(writer)
 		}
 	}
+
+	return getHeadlessWriter(outputFile), func() {}
+}
+
+// writeCSVOutput writes metrics in CSV format.
+func writeCSVOutput(writer io.Writer, output HeadlessOutput) error {
+	csvWriter := csv.NewWriter(writer)
+	defer csvWriter.Flush()
+
+	var record []string
+	record = append(record,
+		output.Timestamp,
+		output.SystemInfo.Name,
+		fmt.Sprintf("%d", output.SystemInfo.CoreCount),
+		fmt.Sprintf("%d", output.SystemInfo.ECoreCount),
+		fmt.Sprintf("%d", output.SystemInfo.PCoreCount),
+		fmt.Sprintf("%d", output.SystemInfo.GPUCoreCount),
+		fmt.Sprintf("%.2f", output.CPUUsage),
+		fmt.Sprintf("%.2f", safeFloat64At(output.ECPUUsage, 0)),
+		fmt.Sprintf("%.2f", safeFloat64At(output.ECPUUsage, 1)),
+		fmt.Sprintf("%.2f", safeFloat64At(output.PCPUUsage, 0)),
+		fmt.Sprintf("%.2f", safeFloat64At(output.PCPUUsage, 1)),
+		fmt.Sprintf("%.2f", output.GPUUsage),
+		fmt.Sprintf("%d", output.GPUMetrics.FreqMHz),
+		fmt.Sprintf("%.2f", output.GPUMetrics.ActivePercent),
+		fmt.Sprintf("%d", output.Memory.Used),
+		fmt.Sprintf("%d", output.Memory.Total),
+		fmt.Sprintf("%d", output.Memory.SwapUsed),
+		fmt.Sprintf("%.2f", output.NetDisk.ReadKBytesPerSec),
+		fmt.Sprintf("%.2f", output.NetDisk.WriteKBytesPerSec),
+		fmt.Sprintf("%.2f", output.NetDisk.InBytesPerSec),
+		fmt.Sprintf("%.2f", output.NetDisk.OutBytesPerSec),
+		fmt.Sprintf("%.2f", output.TBNetTotalBytesInSec),
+		fmt.Sprintf("%.2f", output.TBNetTotalBytesOutSec),
+		fmt.Sprintf("%.2f", output.SocMetrics.TotalPower),
+		fmt.Sprintf("%.2f", output.SocMetrics.SystemPower),
+		fmt.Sprintf("%.2f", output.SocMetrics.CPUTemp),
+		fmt.Sprintf("%.2f", output.SocMetrics.GPUTemp),
+		output.ThermalState,
+		fmt.Sprintf("%t", output.RDMAStatus.Available),
+		output.RDMAStatus.Status,
+		fmt.Sprintf("%d", len(output.RDMAStatus.Devices)),
+	)
+
+	for i := 0; i < output.SystemInfo.CoreCount; i++ {
+		val := 0.0
+		if i < len(output.CoreUsages) {
+			val = output.CoreUsages[i]
+		}
+		record = append(record, fmt.Sprintf("%.2f", val))
+	}
+
+	tbJSON, _ := json.Marshal(output.ThunderboltInfo)
+	procsJSON, _ := json.Marshal(output.Processes)
+	linksJSON, _ := json.Marshal(output.NetworkLinks)
+	volsJSON, _ := json.Marshal(output.Volumes)
+	record = append(record, string(tbJSON), string(procsJSON), string(linksJSON), string(volsJSON))
+
+	if err := csvWriter.Write(record); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing CSV record: %v\n", err)
+	}
+	return nil
+}
+
+// writeSNMPOutput writes metrics in SNMP key=value format.
+func writeSNMPOutput(writer io.Writer, output HeadlessOutput) error {
+	lines := []string{
+		fmt.Sprintf("mactop.cpu.usage=%.2f", output.CPUUsage),
+		fmt.Sprintf("mactop.cpu.ecpu_freq_mhz=%.0f", safeFloat64At(output.ECPUUsage, 0)),
+		fmt.Sprintf("mactop.cpu.pcpu_freq_mhz=%.0f", safeFloat64At(output.PCPUUsage, 0)),
+		fmt.Sprintf("mactop.gpu.usage=%.2f", output.GPUUsage),
+		fmt.Sprintf("mactop.gpu.freq_mhz=%d", output.GPUMetrics.FreqMHz),
+		fmt.Sprintf("mactop.memory.used_gb=%.2f", float64(output.Memory.Used)/1024/1024/1024),
+		fmt.Sprintf("mactop.memory.total_gb=%.2f", float64(output.Memory.Total)/1024/1024/1024),
+		fmt.Sprintf("mactop.memory.swap_used_gb=%.2f", float64(output.Memory.SwapUsed)/1024/1024/1024),
+		fmt.Sprintf("mactop.network.in_bytes_per_sec=%.2f", output.NetDisk.InBytesPerSec),
+		fmt.Sprintf("mactop.network.out_bytes_per_sec=%.2f", output.NetDisk.OutBytesPerSec),
+		fmt.Sprintf("mactop.disk.read_kbytes_per_sec=%.2f", output.NetDisk.ReadKBytesPerSec),
+		fmt.Sprintf("mactop.disk.write_kbytes_per_sec=%.2f", output.NetDisk.WriteKBytesPerSec),
+		fmt.Sprintf("mactop.power.total_watts=%.2f", output.SocMetrics.TotalPower),
+		fmt.Sprintf("mactop.power.system_watts=%.2f", output.SocMetrics.SystemPower),
+		fmt.Sprintf("mactop.temp.cpu_celsius=%.2f", output.SocMetrics.CPUTemp),
+		fmt.Sprintf("mactop.temp.gpu_celsius=%.2f", output.SocMetrics.GPUTemp),
+		fmt.Sprintf("mactop.thermal.state=%s", output.ThermalState),
+		fmt.Sprintf("mactop.rdma.available=%t", output.RDMAStatus.Available),
+		fmt.Sprintf("mactop.timestamp=%s", output.Timestamp),
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(writer, line); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing SNMP line: %v\n", err)
+		}
+	}
+	return nil
+}
+
+// writeStructuredOutput writes metrics in structured formats (JSON, YAML, XML, toon).
+func writeStructuredOutput(writer io.Writer, format string, output HeadlessOutput) error {
+	var data []byte
+	var err error
 
 	switch format {
 	case "json":
@@ -402,96 +521,6 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 		}
 	case "toon":
 		data, err = toon.Marshal(output)
-	case "csv":
-		// Use encoding/csv for correct escaping
-		csvWriter := csv.NewWriter(writer)
-
-		var record []string
-
-		// Standard fields
-		record = append(record,
-			output.Timestamp,
-			output.SystemInfo.Name,
-			fmt.Sprintf("%d", output.SystemInfo.CoreCount),
-			fmt.Sprintf("%d", output.SystemInfo.ECoreCount),
-			fmt.Sprintf("%d", output.SystemInfo.PCoreCount),
-			fmt.Sprintf("%d", output.SystemInfo.GPUCoreCount),
-			fmt.Sprintf("%.2f", output.CPUUsage),
-			fmt.Sprintf("%.2f", safeFloat64At(output.ECPUUsage, 0)),
-			fmt.Sprintf("%.2f", safeFloat64At(output.ECPUUsage, 1)),
-			fmt.Sprintf("%.2f", safeFloat64At(output.PCPUUsage, 0)),
-			fmt.Sprintf("%.2f", safeFloat64At(output.PCPUUsage, 1)),
-			fmt.Sprintf("%.2f", output.GPUUsage),
-			fmt.Sprintf("%d", output.GPUMetrics.FreqMHz),
-			fmt.Sprintf("%.2f", output.GPUMetrics.ActivePercent),
-			fmt.Sprintf("%d", output.Memory.Used),
-			fmt.Sprintf("%d", output.Memory.Total),
-			fmt.Sprintf("%d", output.Memory.SwapUsed),
-			fmt.Sprintf("%.2f", output.NetDisk.ReadKBytesPerSec),
-			fmt.Sprintf("%.2f", output.NetDisk.WriteKBytesPerSec),
-			fmt.Sprintf("%.2f", output.NetDisk.InBytesPerSec),
-			fmt.Sprintf("%.2f", output.NetDisk.OutBytesPerSec),
-			fmt.Sprintf("%.2f", output.TBNetTotalBytesInSec),
-			fmt.Sprintf("%.2f", output.TBNetTotalBytesOutSec),
-			fmt.Sprintf("%.2f", output.SocMetrics.TotalPower),
-			fmt.Sprintf("%.2f", output.SocMetrics.SystemPower),
-			fmt.Sprintf("%.2f", output.SocMetrics.CPUTemp),
-			fmt.Sprintf("%.2f", output.SocMetrics.GPUTemp),
-			output.ThermalState,
-			fmt.Sprintf("%t", output.RDMAStatus.Available),
-			output.RDMAStatus.Status,
-			fmt.Sprintf("%d", len(output.RDMAStatus.Devices)),
-		)
-
-		for i := 0; i < output.SystemInfo.CoreCount; i++ {
-			val := 0.0
-			if i < len(output.CoreUsages) {
-				val = output.CoreUsages[i]
-			}
-			record = append(record, fmt.Sprintf("%.2f", val))
-		}
-
-		tbJSON, _ := json.Marshal(output.ThunderboltInfo)
-		procsJSON, _ := json.Marshal(output.Processes)
-		linksJSON, _ := json.Marshal(output.NetworkLinks)
-		volsJSON, _ := json.Marshal(output.Volumes)
-		record = append(record, string(tbJSON), string(procsJSON), string(linksJSON), string(volsJSON))
-
-		if err := csvWriter.Write(record); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing CSV record: %v\n", err)
-		}
-		csvWriter.Flush()
-		return nil
-	case "snmp":
-		// SNMP-compatible format: key=value pairs for snmpd consumption
-		// This format is easily parsable by snmpd extend/pass scripts
-		lines := []string{
-			fmt.Sprintf("mactop.cpu.usage=%.2f", output.CPUUsage),
-			fmt.Sprintf("mactop.cpu.ecpu_freq_mhz=%.0f", safeFloat64At(output.ECPUUsage, 0)),
-			fmt.Sprintf("mactop.cpu.pcpu_freq_mhz=%.0f", safeFloat64At(output.PCPUUsage, 0)),
-			fmt.Sprintf("mactop.gpu.usage=%.2f", output.GPUUsage),
-			fmt.Sprintf("mactop.gpu.freq_mhz=%d", output.GPUMetrics.FreqMHz),
-			fmt.Sprintf("mactop.memory.used_gb=%.2f", float64(output.Memory.Used)/1024/1024/1024),
-			fmt.Sprintf("mactop.memory.total_gb=%.2f", float64(output.Memory.Total)/1024/1024/1024),
-			fmt.Sprintf("mactop.memory.swap_used_gb=%.2f", float64(output.Memory.SwapUsed)/1024/1024/1024),
-			fmt.Sprintf("mactop.network.in_bytes_per_sec=%.2f", output.NetDisk.InBytesPerSec),
-			fmt.Sprintf("mactop.network.out_bytes_per_sec=%.2f", output.NetDisk.OutBytesPerSec),
-			fmt.Sprintf("mactop.disk.read_kbytes_per_sec=%.2f", output.NetDisk.ReadKBytesPerSec),
-			fmt.Sprintf("mactop.disk.write_kbytes_per_sec=%.2f", output.NetDisk.WriteKBytesPerSec),
-			fmt.Sprintf("mactop.power.total_watts=%.2f", output.SocMetrics.TotalPower),
-			fmt.Sprintf("mactop.power.system_watts=%.2f", output.SocMetrics.SystemPower),
-			fmt.Sprintf("mactop.temp.cpu_celsius=%.2f", output.SocMetrics.CPUTemp),
-			fmt.Sprintf("mactop.temp.gpu_celsius=%.2f", output.SocMetrics.GPUTemp),
-			fmt.Sprintf("mactop.thermal.state=%s", output.ThermalState),
-			fmt.Sprintf("mactop.rdma.available=%t", output.RDMAStatus.Available),
-			fmt.Sprintf("mactop.timestamp=%s", output.Timestamp),
-		}
-		for _, line := range lines {
-			if _, err := fmt.Fprintln(writer, line); err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing SNMP line: %v\n", err)
-			}
-		}
-		return nil
 	}
 
 	if err != nil {
