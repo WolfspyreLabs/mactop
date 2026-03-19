@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/toon-format/toon-go"
 	"gopkg.in/yaml.v3"
@@ -338,7 +339,28 @@ func printHeadlessSeparator(format string, count int, samplesCollected int, outp
 func startHeadlessPrometheus() {
 	if prometheusPort != "" {
 		go func() {
-			http.Handle("/metrics", promhttp.Handler())
+			// Create a custom registry and register all mactop metrics
+			registry := prometheus.NewRegistry()
+			registry.MustRegister(cpuUsage)
+			registry.MustRegister(ecoreUsage)
+			registry.MustRegister(pcoreUsage)
+			registry.MustRegister(gpuUsage)
+			registry.MustRegister(gpuFreqMHz)
+			registry.MustRegister(powerUsage)
+			registry.MustRegister(socTemp)
+			registry.MustRegister(gpuTemp)
+			registry.MustRegister(thermalState)
+			registry.MustRegister(memoryUsage)
+			registry.MustRegister(networkSpeed)
+			registry.MustRegister(diskIOSpeed)
+			registry.MustRegister(diskIOPS)
+			registry.MustRegister(tbNetworkSpeed)
+			registry.MustRegister(rdmaAvailable)
+			registry.MustRegister(cpuCoreUsage)
+			registry.MustRegister(systemInfoGauge)
+
+			handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+			http.Handle("/metrics", handler)
 			if err := http.ListenAndServe(prometheusPort, nil); err != nil {
 				fmt.Fprintf(os.Stderr, "Prometheus server error: %v\n", err)
 			}
@@ -585,14 +607,14 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 	mem := getMemoryMetrics()
 	netDisk := getNetDiskMetrics()
 
-	var cpuUsage float64
+	var cpuUsagePercent float64
 	percentages, err := GetCPUPercentages()
 	if err == nil && len(percentages) > 0 {
 		var total float64
 		for _, p := range percentages {
 			total += p
 		}
-		cpuUsage = total / float64(len(percentages))
+		cpuUsagePercent = total / float64(len(percentages))
 	}
 
 	thermalStr, _ := getThermalStateString()
@@ -660,12 +682,15 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 		})
 	}
 
+	// Update Prometheus metrics in headless mode
+	updateHeadlessPrometheusMetrics(cpuUsagePercent, m, mem, percentages, sysInfo)
+
 	return HeadlessOutput{
 		Timestamp:             time.Now().Format(time.RFC3339),
 		SocMetrics:            m,
 		Memory:                mem,
 		NetDisk:               netDisk,
-		CPUUsage:              cpuUsage,
+		CPUUsage:              cpuUsagePercent,
 		ECPUUsage:             []float64{float64(m.EClusterFreqMHz), m.EClusterActive},
 		PCPUUsage:             []float64{float64(m.PClusterFreqMHz), m.PClusterActive},
 		GPUUsage:              m.GPUActive,
@@ -683,6 +708,77 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 		RDMAStatus:            rdmaStatus,
 		ThermalState:          thermalStr,
 	}
+}
+
+// updateHeadlessPrometheusMetrics updates Prometheus metrics in headless mode
+func updateHeadlessPrometheusMetrics(cpuUsagePercent float64, m SocMetrics, mem MemoryMetrics, coreUsages []float64, sysInfo SystemInfo) {
+	thermalStr, _ := getThermalStateString()
+	thermalStateNum := 0
+	switch thermalStr {
+	case "Fair":
+		thermalStateNum = 1
+	case "Serious":
+		thermalStateNum = 2
+	case "Critical":
+		thermalStateNum = 3
+	}
+
+	// Calculate E-core and P-core averages
+	var ecoreTotal, pcoreTotal float64
+	eCoreCount := sysInfo.ECoreCount
+	var ecoreCount, pcoreCount int
+
+	for i, usage := range coreUsages {
+		if i < eCoreCount {
+			ecoreTotal += usage
+			ecoreCount++
+		} else {
+			pcoreTotal += usage
+			pcoreCount++
+		}
+	}
+
+	ecoreAvg := 0.0
+	if ecoreCount > 0 {
+		ecoreAvg = ecoreTotal / float64(ecoreCount)
+	}
+	pcoreAvg := 0.0
+	if pcoreCount > 0 {
+		pcoreAvg = pcoreTotal / float64(pcoreCount)
+	}
+
+	// Update Prometheus metrics
+	cpuUsage.Set(cpuUsagePercent)
+	ecoreUsage.Set(ecoreAvg)
+	pcoreUsage.Set(pcoreAvg)
+	gpuUsage.Set(m.GPUActive)
+	gpuFreqMHz.Set(float64(m.GPUFreqMHz))
+	socTemp.Set(float64(m.CPUTemp))
+	gpuTemp.Set(float64(m.GPUTemp))
+	thermalState.Set(float64(thermalStateNum))
+
+	// Update memory metrics
+	memoryUsage.With(prometheus.Labels{"type": "used"}).Set(float64(mem.Used) / 1024 / 1024 / 1024)
+	memoryUsage.With(prometheus.Labels{"type": "total"}).Set(float64(mem.Total) / 1024 / 1024 / 1024)
+	memoryUsage.With(prometheus.Labels{"type": "swap_used"}).Set(float64(mem.SwapUsed) / 1024 / 1024 / 1024)
+	memoryUsage.With(prometheus.Labels{"type": "swap_total"}).Set(float64(mem.SwapTotal) / 1024 / 1024 / 1024)
+
+	// Update per-core CPU usage metrics
+	for i, usage := range coreUsages {
+		coreType := "p"
+		if i < eCoreCount {
+			coreType = "e"
+		}
+		cpuCoreUsage.With(prometheus.Labels{"core": fmt.Sprintf("%d", i), "type": coreType}).Set(usage)
+	}
+
+	// Update power metrics
+	powerUsage.With(prometheus.Labels{"component": "cpu"}).Set(m.CPUPower)
+	powerUsage.With(prometheus.Labels{"component": "gpu"}).Set(m.GPUPower)
+	powerUsage.With(prometheus.Labels{"component": "ane"}).Set(m.ANEPower)
+	powerUsage.With(prometheus.Labels{"component": "dram"}).Set(m.DRAMPower)
+	powerUsage.With(prometheus.Labels{"component": "gpu_sram"}).Set(m.GPUSRAMPower)
+	powerUsage.With(prometheus.Labels{"component": "total"}).Set(m.TotalPower)
 }
 
 func mapTBNetStatsToBuses(tbNetStats []ThunderboltNetStats, tbInfo *ThunderboltOutput) {
